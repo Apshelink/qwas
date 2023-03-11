@@ -1,0 +1,249 @@
+import openai
+from aiogram import Bot, types
+from aiogram.dispatcher import Dispatcher
+from aiogram.utils import executor
+
+# Указываем токен бота и ключ OpenAI
+TOKEN = '5975902749:AAHzTwi9Bx76BDB9Mc5uiE70a-5SlzjUIZg'
+openai.api_key = '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'
+
+# Инициализируем бота и диспетчер
+bot = Bot(TOKEN)
+dp = Dispatcher(bot)
+
+# Список стоп-слов, которые будут использоваться для остановки генерации
+STOP_WORDS = ["Human:", "AI:", "Bot:"]
+
+# Словарь контекста для каждого чата
+context = {}
+last_response = ""
+
+# Функция для генерации ответа с помощью DALL-E 2
+async def generate_image_response(message: types.Message):
+    global context
+    global last_response
+
+    # Получаем картинку, отправленную пользователем
+    photo = message.photo[-1]
+    file_id = photo.file_id
+
+    # Получаем ссылку на файл с картинкой
+    file = await bot.get_file(file_id)
+    image_url = file.file_path
+
+    # Генерируем описание для картинки с помощью OpenAI DALL-E 2
+    prompt = f"Draw a {message.text.lower()} on the image at {image_url} and describe it in one sentence."
+    response = openai.Completion.create(
+        engine="dall-e-2",
+        prompt=prompt,
+        temperature=0.7,
+        max_tokens=2000,
+        top_p=1.0,
+        frequency_penalty=0.0,
+        presence_penalty=0.6,
+        stop=STOP_WORDS,
+        n=1
+    )
+
+    # Получаем текст ответа из API OpenAI
+    answer = response.choices[0].text.strip()
+
+    # Запоминаем текущий ответ в переменной last_response
+    last_response = answer
+
+    # Обновляем контекст для текущего чата
+    context[message.chat.id] = prompt + last_response + "\n"
+
+    # Отправляем ответ пользователю
+    await message.answer(answer)
+
+
+# Обработчик команды /start
+@dp.message_handler(commands=['start'])
+async def start_command(message: types.Message):
+    await message.reply("Привет! Я - AITron, готовый помочь тебе с чем угодно!")
+
+# Обработчик команды /draw
+@dp.message_handler(commands=['draw'])
+async def draw_command(message: types.Message):
+    # Спрашиваем у пользователя, что он хочет нарисовать
+    await message.reply("Какой объект вы хотели бы нарисовать на этой картинке?")
+
+    # Устанавливаем состояние ожидания ответа пользователя
+    context[message.chat.id] = "waiting_for_object"
+
+# Обработчик всех сообщений
+@dp.message_handler()
+async def message_handler(message: types.Message):
+    global context
+    global last_response
+
+    # Проверяем, есть ли контекст для текущего чата
+    if message.chat.id not in context:
+        context[message.chat.id] = ""
+
+    # Если состояние чата - ожидание ответа на вопрос о генерации изображения
+    elif state == State.WAITING_FOR_DRAW_GENERATION:
+        # Получаем параметры генерации изображения из контекста
+        image_size = context[chat_id]["image_size"]
+        prompt = context[chat_id]["prompt"]
+        attempts_left = context[chat_id]["attempts_left"]
+
+        # Отправляем пользователю сообщение о том, что генерация может занять некоторое время
+        await message.answer("Генерация изображения может занять некоторое время...")
+
+        # Генерируем изображение с помощью DALL-E 2 API
+        response = generate_image(prompt, image_size)
+
+        # Если генерация прошла успешно, отправляем пользователю изображение
+        if response.status_code == 200:
+            await bot.send_photo(chat_id, response.content)
+            await message.answer("Получилось! Надеюсь, тебе нравится :)")
+            # Возвращаем состояние чата в исходное - ожидание новой команды
+            state = State.WAITING_FOR_COMMAND
+            context[chat_id] = {}
+        # Если генерация не удалась, уменьшаем количество попыток и сообщаем об ошибке
+        else:
+            attempts_left -= 1
+            if attempts_left > 0:
+                await message.answer("Что-то пошло не так :( Попробуй еще раз.")
+                context[chat_id]["attempts_left"] = attempts_left
+            else:
+                await message.answer("Не удалось сгенерировать изображение :(")
+            # Возвращаем состояние чата в исходное - ожидание новой команды
+            state = State.WAITING_FOR_COMMAND
+            context[chat_id] = {}
+
+# Обработчик команды /retry
+elif message.text == "/retry":
+    # Проверяем, что состояние чата - ожидание генерации изображения
+    if state == State.WAITING_FOR_DRAW_GENERATION:
+        # Получаем параметры генерации изображения из контекста
+        image_size = context[chat_id]["image_size"]
+        prompt = context[chat_id]["prompt"]
+        attempts_left = context[chat_id]["attempts_left"]
+
+        # Уменьшаем количество попыток
+        attempts_left -= 1
+        if attempts_left > 0:
+            await message.answer("Попробуем еще раз...")
+            context[chat_id]["attempts_left"] = attempts_left
+            # Генерируем изображение заново
+            try:
+                response = generate_image(prompt, image_size)
+                # Если генерация прошла успешно, отправляем пользователю изображение
+                if response.status_code == 200:
+                    await bot.send_photo(chat_id, response.content)
+                    await message.answer("Получилось! Надеюсь, тебе нравится :)")
+                    # Возвращаем состояние чата в исходное - ожидание новой команды
+                    state = State.WAITING_FOR_COMMAND
+                    context[chat_id] = {}
+            # Если генерация не удалась, отправляем сообщение о проблеме
+            except Exception as e:
+                await message.answer("Произошла ошибка при генерации ответа. Попробуйте позже.")
+                print(f"Error: {e}")
+        
+#Обработчик команды /draw
+@dp.message_handler(commands=['draw'])
+async def draw_command(message: types.Message):
+global context
+global last_response
+
+python
+Copy code
+# Проверяем, есть ли контекст для текущего чата
+if message.chat.id not in context:
+    context[message.chat.id] = ""
+
+# Устанавливаем состояние чата в режим ожидания ответа на вопрос о рисунке
+context[message.chat.id] = "awaiting_dalle_prompt"
+
+# Отправляем сообщение с просьбой описать рисунок
+await message.answer("Опишите, какой рисунок вы хотите нарисовать:")
+#Обработчик сообщений в режиме ожидания вопроса для рисования
+@dp.message_handler(func=lambda message: context.get(message.chat.id) == "awaiting_dalle_prompt")
+async def handle_dalle_prompt(message: types.Message):
+global context
+global last_response
+# Устанавливаем состояние чата в режим генерации ответа
+context[message.chat.id] = "generating_response"
+
+# Отображаем индикатор того, что бот печатает сообщение
+async with bot.typing(message.chat.id):
+    # Генерируем ответ с помощью модели DALL-E 2
+    try:
+        response = openai.Completion.create(
+            engine="davinci",
+            prompt=f"Draw a picture of a {message.text}",
+            max_tokens=2048,
+            n=1,
+            stop=None,
+            temperature=0.5,
+        )
+
+        # Получаем текст ответа из API OpenAI
+        answer = response.choices[0].text.strip()
+
+        # Запоминаем текущий ответ в переменной last_response
+        last_response = answer
+
+        # Обновляем контекст для текущего чата
+        context[message.chat.id] = ""
+
+        # Отправляем ответ пользователю
+        await message.answer_photo(photo=answer)
+    
+    # Если генерация не удалась, отправляем сообщение о проблеме
+    except Exception as e:
+        await message.answer("Произошла ошибка при генерации рисунка. Попробуйте позже.")
+        print(f"Error: {e}")
+#Обработчик команды /retry
+@dp.message_handler(commands=['retry'])
+async def retry_command(message: types.Message):
+global context
+
+python
+Copy code
+# Проверяем, есть ли контекст для текущего чата
+if message.chat.id not in context:
+    context[message.chat.id] = ""
+
+# Очищаем последний ответ и контекст
+context[message.chat.id] = ""
+last_response = ""
+
+# Отправляем сообщение с просьбой задать вопрос заново
+await message.answer("Отправьте ваш вопрос заново, пожалуйста.")
+#Отправляем сообщение с просьбой задать вопрос заново
+async def ask_again(message: types.Message):
+global chat_state
+chat_state[message.chat.id] = "awaiting_question"
+await message.answer("Кажется, что-то пошло не так. Пожалуйста, задайте свой вопрос заново.")
+
+#Обработчик команды /start
+@dp.message_handler(commands=['start'])
+async def start_command(message: types.Message):
+global chat_state
+chat_state[message.chat.id] = "awaiting_question"
+await message.reply("Привет! Я - бот, готовый ответить на любые вопросы!")
+#Обработчик всех сообщений
+@dp.message_handler()
+async def message_handler(message: types.Message):
+global chat_state
+global last_question
+global last_response
+
+python
+Copy code
+# Проверяем состояние чата и обрабатываем соответствующим образом
+if chat_state[message.chat.id] == "awaiting_question":
+    await process_question(message)
+elif chat_state[message.chat.id] == "awaiting_confirmation":
+    await process_confirmation(message)
+elif chat_state[message.chat.id] == "awaiting_retry":
+    await process_retry(message)
+elif chat_state[message.chat.id] == "awaiting_feedback":
+    await process_feedback(message)
+#Запускаем бота
+if name == 'main':
+executor.start_polling(dp, skip_updates=True)
